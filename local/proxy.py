@@ -410,8 +410,9 @@ class LocalProxyHandler(HandlerStatistic, Tiger):
                 allowed_failed = 0
 
             resp_decrypted = self.decrypt_aes(resp_encrypted,
-                                          aeskey=self.keysoup['s_key'],
-                                          hmackey=self.keysoup['s_hmac_key'])
+                                          aeskey=self.keysoup['srv_key'],
+                                          hmackey=self.keysoup['srv_hmac'])
+
             if resp_decrypted[:16] != req_id:
                 raise HandshakeError('replay attack')
                 return
