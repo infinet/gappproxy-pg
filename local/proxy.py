@@ -40,6 +40,7 @@ else:
 
 
 MAX_TRUNK = 1024 * 256  # max 256K in range fetch
+LOCK_TIMEOUT = 20  # key negotiate lock time out
 RE_RANGE = re.compile(r'bytes[ \t]+([0-9]+)-([0-9]+)/([0-9]+)')
 REMOVE_GAPP = frozenset(['content-length', 'accept-ranges', 'content-range'])
 RESUME_EXT = frozenset(['mp3', 'mp4', 'avi', 'flv', 'msi', 'exe',
@@ -188,6 +189,7 @@ class LocalProxyHandler(HandlerStatistic, Tiger):
 
     lock = False
     unlock_time = 0
+    lock_time = 0
 
     def relogin(self):
         ''' Re-Negotiate the session keys
@@ -198,9 +200,11 @@ class LocalProxyHandler(HandlerStatistic, Tiger):
         new key, that new key has JUST ACQUIRED
         '''
 
+
         if LocalProxyHandler.lock:
             # 524: 'Another key negotiation thread is running ...'
             print SP_ERROR[524]
+            print 'in relogin, when fetch %s \n' % self.path
             time.sleep(3)
             self.retry_do_method()
             return
@@ -215,6 +219,7 @@ class LocalProxyHandler(HandlerStatistic, Tiger):
         print SP_ERROR[523]
 
         LocalProxyHandler.lock = True
+        LocalProxyHandler.lock_time = time.time()
         clt_conn = ClientHello(cfg=self.cfg)
         LocalProxyHandler.keysoup = clt_conn.onestep_login()
 
@@ -231,6 +236,17 @@ class LocalProxyHandler(HandlerStatistic, Tiger):
             self.retry_do_method()
 
     def retry_do_method(self):
+
+        # Observed the key negotiating fall into infinit 'another key
+        # negotiation thread is running', perhaps it is stalled at gapp engine
+        # side, and the lock can not be unlocked by itself. Then do_method and
+        # retry_do_method call each other into infinit loop. Set lock time out
+        # at 20 seconds in case previous lock stalled.
+
+        if time.time() - LocalProxyHandler.lock_time > LOCK_TIMEOUT:
+            LocalProxyHandler.lock = False
+            dprint('time out, unlock key negotiating')
+
         self.keysoup = LocalProxyHandler.keysoup
         self.do_method()
 
@@ -252,6 +268,7 @@ class LocalProxyHandler(HandlerStatistic, Tiger):
 
         if LocalProxyHandler.lock:
             print SP_ERROR[524]
+            print 'in do_method, when fetch %s \n' % self.path
             time.sleep(3)
             self.retry_do_method()
             return
@@ -329,9 +346,9 @@ class LocalProxyHandler(HandlerStatistic, Tiger):
                 self.custom_gapp_error(err.code)
             return
         except urllib2.URLError, err:
-           dprint('i am in URLError')
-           dprint(err)
-           return
+            dprint('i am in URLError')
+            dprint(err)
+            return
 
         resp_decrypted = self.decrypt_aes(resp_encrypted,
                                           aeskey=self.keysoup['srv_key'],
@@ -518,7 +535,8 @@ class ClientHello(Tiger):
         formatted as:
         """
         try:
-            server_finish = open_request(self.login_srv, self.onestep()).read()
+            server_finish = open_request(self.login_srv, self.onestep(),
+                                        self.proxy).read()
         except HandshakeError:
             return None
 
@@ -593,6 +611,7 @@ def main():
     runtime_cfg = get_config()
     clt_conn = ClientHello(cfg=runtime_cfg)
     listen_port = int(runtime_cfg['listen_address'].split(':')[1])
+    listen_ip = runtime_cfg['listen_address'].split(':')[0]
     #try:
     keysoup = clt_conn.onestep_login()
     #except urllib2.URLError:
@@ -614,7 +633,7 @@ def main():
         print '--------------------------------------------'
         #print 'HTTPS Enabled: %s' % (ssl_enabled and 'YES' or 'NO')
         print 'HTTPS Disabled'
-        print 'Listen Addr  : 127.0.0.1:%d' % listen_port
+        print 'Listen Addr  : %s' % runtime_cfg['listen_address']
         if clt_conn.proxy:
             print 'Local Proxy  : %s' % clt_conn.proxy['http']
         print 'Fetch Server : %s' % runtime_cfg['fetch_server']
@@ -622,10 +641,11 @@ def main():
         print ''
         print info
         LocalProxyHandler.keysoup = keysoup
+        LocalProxyHandler.proxy = runtime_cfg['local_proxy']
         handler = LocalProxyHandler
         handler.cfg = runtime_cfg
 
-        httpd = ThreadingHTTPServer(('127.0.0.1', listen_port), handler)
+        httpd = ThreadingHTTPServer((listen_ip, listen_port), handler)
         try:
             httpd.serve_forever()
         except KeyboardInterrupt:
