@@ -4,10 +4,12 @@
 # fetchserver/index.py
 ''' listen and send response back to client '''
 
+import hashlib
 import time
 import logging
 import wsgiref.handlers
 from struct import unpack
+from google.appengine.ext import db
 from google.appengine.api import memcache
 from google.appengine.api import urlfetch
 #from google.appengine.api import urlfetch_errors
@@ -33,6 +35,13 @@ def dprint(msg, prefix='Debug: '):
     logging.info(prefix + msg)
 
 
+class StoreKey(db.Model):
+    """the database for storing session_id and its correspond session_keys"""
+    s_id = db.ByteStringProperty()
+    s_key_hmackey = db.BlobProperty()
+    date = db.DateTimeProperty(auto_now_add=True)
+
+
 def get_session_key(s_id):
     """Get the session_key from memcache, return None if not found
     Args:
@@ -46,6 +55,41 @@ def get_session_key(s_id):
         expiretime = unpack('<i', key_block[-4:])[0]
         if time.time() > expiretime:
             return None
+        keysoup = {'s_id': s_id,
+               'srv_key': key_block[:Tiger.SKEY_SIZE],
+               'srv_hmac': key_block[Tiger.SKEY_SIZE:
+                                     Tiger.SKEY_SIZE + Tiger.HMACKEY_SIZE],
+               'clt_key': key_block[Tiger.SKEY_SIZE + Tiger.HMACKEY_SIZE:
+                                Tiger.SKEY_SIZE * 2 + Tiger.HMACKEY_SIZE],
+               'clt_hmac': key_block[Tiger.SKEY_SIZE * 2 +
+                                     Tiger.HMACKEY_SIZE: -4]}
+    return keysoup
+
+
+def get_session_key_old(s_id):
+    """Get the session_key from memcache, if not found, retrive it from GAE
+    datastore.
+    Args:
+        sess_id: the client's session id to look up
+    Return:
+        {session_id: key, hmac_id: hmac_key}"""
+    memcache_miss = False
+    sess_id = hashlib.sha1(s_id).hexdigest()
+    key_block = memcache.get(sess_id)
+    if not key_block:
+        memcache_miss = True
+        stored_keys = db.GqlQuery('SELECT * FROM StoreKey WHERE s_id = :1',
+                                  sess_id).get()
+        if not stored_keys:
+            return None
+        key_block = stored_keys.s_key_hmackey
+
+    expiretime = unpack('<i', key_block[-4:])[0]
+    if time.time() > expiretime:
+        keysoup = None
+    else:
+        if memcache_miss:
+            memcache.set(key=sess_id, value=key_block)
         keysoup = {'s_id': s_id,
                'srv_key': key_block[:Tiger.SKEY_SIZE],
                'srv_hmac': key_block[Tiger.SKEY_SIZE:

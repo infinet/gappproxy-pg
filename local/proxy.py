@@ -53,6 +53,7 @@ SP_ERROR = {404: 'Local proxy error, Fetchserver not found',
             523: 'Re-negotiating encryption key, please wait ...',
             524: 'Another key negotiation is running, wait 3 seconds ...'}
 
+
 def get_config():
     '''parse the configure file, return a dictionary of preconfigured
     shapes and locations'''
@@ -63,10 +64,12 @@ def get_config():
     config.read(conf_file)
 
     confs = {'listen_port': 8000,
-             'fetch_server':'localhost',
-             'local_proxy':'',
+             'fetch_server': 'localhost',
+             'gae_ip': None,
+             'gae_host': None,
+             'local_proxy': '',
              'self': {}}
-    gae_keys = ('listen_address', 'fetch_server', 'fetch_path',
+    gae_keys = ('listen_address', 'fetch_server', 'fetch_path', 'gae_ip',
                 'login_path', 'proxy_choice', 'ipv6_proxy')
 
     for key in gae_keys:
@@ -74,6 +77,8 @@ def get_config():
             confs[key] = config.get('gae', key)
         except ConfigParser.NoOptionError:
             pass
+
+    confs['gae_host'] = confs['fetch_server'].split('/')[-1]
 
     try:
         pchoice = config.get('proxies', confs['proxy_choice'])
@@ -157,7 +162,7 @@ def pretty_num(num):
     return ','.join(res)
 
 
-def open_request(path, data, proxy=None):
+def open_request(path, data, gae_host=None, proxy=None):
     '''request handle
     Args:
         path: the request URL
@@ -167,6 +172,7 @@ def open_request(path, data, proxy=None):
         an opener'''
     request = urllib2.Request(path)
     request.add_data(data)
+    request.add_header('Host', gae_host)
     request.add_header('Content-Type', 'application/octet-stream')
     request.add_header('User-Agent',
                        'Mozilla/4.0 (compatible; MSIE 6.0; Windows NT 5.1)')
@@ -199,8 +205,6 @@ class LocalProxyHandler(HandlerStatistic, Tiger):
         was somehow delayed and when they received 521 error and try to get a
         new key, that new key has JUST ACQUIRED
         '''
-
-
         if LocalProxyHandler.lock:
             # 524: 'Another key negotiation thread is running ...'
             print SP_ERROR[524]
@@ -273,9 +277,9 @@ class LocalProxyHandler(HandlerStatistic, Tiger):
             self.retry_do_method()
             return
 
-        self.fetch_srv = norm_address(self.cfg['fetch_server'] +
+        self.fetch_srv = norm_address(self.cfg['gae_ip'] +
                                       self.cfg['fetch_path'])
-        self.login_srv = norm_address(self.cfg['fetch_server'] +
+        self.login_srv = norm_address(self.cfg['gae_ip'] +
                                       self.cfg['login_path'])
         self.proxy = self.cfg['local_proxy']
 
@@ -331,12 +335,12 @@ class LocalProxyHandler(HandlerStatistic, Tiger):
         msg = obfus_key + self.encrypt_aes(plain_params,
                                            aeskey=self.keysoup['clt_key'],
                                            hmackey=self.keysoup['clt_hmac'])
-
-
         # encrypt, send plain request to gapp, and get response
         try:
             resp_encrypted = open_request(self.fetch_srv,
-                                              msg, self.proxy).read()
+                                          msg,
+                                          gae_host=self.gae_host,
+                                          proxy=self.proxy).read()
             HandlerStatistic.stat['getcnt'] += 1
             HandlerStatistic.stat['rcvbytes'] += len(resp_encrypted)
         except urllib2.HTTPError, err:
@@ -414,7 +418,9 @@ class LocalProxyHandler(HandlerStatistic, Tiger):
 
             try:
                 resp_encrypted = open_request(self.fetch_srv,
-                                              msg, self.proxy).read()
+                                              msg,
+                                              gae_host=self.gae_host,
+                                              proxy=self.proxy).read()
                 HandlerStatistic.stat['getcnt'] += 1
                 HandlerStatistic.stat['rcvbytes'] += len(resp_encrypted)
             except urllib2.HTTPError, err:
@@ -514,8 +520,9 @@ class ClientHello(Tiger):
         # for HMAC, the rest of string serve to complicate the cipher text,
         # avoid padding
 
-        self.fetch_srv = norm_address(cfg['fetch_server'] + cfg['fetch_path'])
-        self.login_srv = norm_address(cfg['fetch_server'] + cfg['login_path'])
+        self.fetch_srv = norm_address(cfg['gae_ip'] + cfg['fetch_path'])
+        self.login_srv = norm_address(cfg['gae_ip'] + cfg['login_path'])
+        self.gae_host = cfg['gae_host']
         self.proxy = cfg['local_proxy']
 
         self.username = cfg['name']
@@ -535,12 +542,12 @@ class ClientHello(Tiger):
         formatted as:
         """
         try:
-            server_finish = open_request(self.login_srv, self.onestep(),
-                                        self.proxy).read()
+            server_finish = open_request(self.login_srv,
+                                         self.onestep(),
+                                         gae_host=self.gae_host,
+                                         proxy=self.proxy).read()
         except HandshakeError:
             return None
-
-
         #dprint('server finish message\nhash=%s\nsize=%d' %
         #   (hashlib.md5(server_finish).hexdigest(), len(server_finish)))
 
@@ -552,7 +559,6 @@ class ClientHello(Tiger):
         srv_random = payload[:32]
         s_id = payload[32: 32 + Tiger.SID_SIZE]
         srv_verify_data = payload[32 + Tiger.SID_SIZE:]
-
 
         master_secret = PRF(self.pre_master_secret, 'master secret',
                             self.client_random + srv_random, 48)
@@ -601,10 +607,10 @@ class ClientHello(Tiger):
 def norm_address(url):
     """ensure the url is in correct form"""
     url = url.lower()
-    if url.startswith('http'):
+    if url.startswith('https'):
         return url
     else:
-        return 'http://' + url
+        return 'https://' + url
 
 
 def main():
@@ -622,7 +628,7 @@ def main():
     #    clt_conn.onestep_login()
 
     print '***********GappProxy Privacy Guard**********'
-    print ''
+    print '   https://github.com/infinet/gappproxy-pg  '
     print '--------------------------------------------'
     print 'Logging into %s' % runtime_cfg['fetch_server']
     if not clt_conn.login_okay:
@@ -632,7 +638,7 @@ def main():
         print ''
         print '--------------------------------------------'
         #print 'HTTPS Enabled: %s' % (ssl_enabled and 'YES' or 'NO')
-        print 'HTTPS Disabled'
+        print 'Warning: This is proxy is HTTP ONLY         '
         print 'Listen Addr  : %s' % runtime_cfg['listen_address']
         if clt_conn.proxy:
             print 'Local Proxy  : %s' % clt_conn.proxy['http']
@@ -642,6 +648,8 @@ def main():
         print info
         LocalProxyHandler.keysoup = keysoup
         LocalProxyHandler.proxy = runtime_cfg['local_proxy']
+        LocalProxyHandler.gae_ip = runtime_cfg['gae_ip']
+        LocalProxyHandler.gae_host = runtime_cfg['gae_host']
         handler = LocalProxyHandler
         handler.cfg = runtime_cfg
 

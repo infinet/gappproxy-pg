@@ -1,4 +1,4 @@
-application: your-id
+application: your_app_id
 version: 1
 runtime: python27
 api_version: 1
@@ -14,7 +14,10 @@ handlers:
   script: index.py
   secure: optional
 
-- url: /login.html
+- url: /static.html
   script: login.py
   secure: optional
 
+- url: /cron_purge.py
+  script: cron_purge.py
+  login: admin

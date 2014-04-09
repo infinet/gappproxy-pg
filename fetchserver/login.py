@@ -16,8 +16,9 @@ from Crypto import Random
 from PycryptoWrap import PRF
 from PycryptoWrap import Tiger
 from google.appengine.api import memcache
+from google.appengine.ext import db
 from google.appengine.ext import webapp
-
+from google.appengine.runtime import apiproxy_errors
 
 scriptpath = os.path.abspath(os.path.dirname(sys.argv[0]))
 peerconf = os.path.join(scriptpath, 'peers.conf')
@@ -47,6 +48,13 @@ def get_config():
             res['users'][vname] = config.get(sec, 'pub')
 
     return res
+
+
+class StoreKey(db.Model):
+    """the database for storing session_id and its correspond session_keys"""
+    s_id = db.ByteStringProperty()
+    s_key_hmackey = db.BlobProperty()
+    date = db.DateTimeProperty(auto_now_add=True)
 
 
 class ProtocolAbort(Exception):
@@ -112,6 +120,10 @@ class ServerHello(Tiger):
         # append timestamp to the end of key_block
         key_block += pack('<i', int(time.time())+ KEYLIFE)
         memcache.set(key=s_id, value=key_block)
+        #sess_id = hashlib.sha1(s_id).hexdigest()
+        #storekey = StoreKey(s_id=sess_id, s_key_hmackey=key_block)
+        #storekey.put()
+        #memcache.set(key=sess_id, value=key_block)
 
         srv_finish = rsa_e + srv_rsa_sign
         return srv_finish
@@ -130,8 +142,14 @@ class Handshake(webapp.RequestHandler, ServerHello):
         return
 
     def post(self):
-        msg = self.request.body
-        srv_resp = self.onestep(msg)
+        srv_resp = ''
+        try:
+            msg = self.request.body
+            srv_resp = self.onestep(msg)
+        except apiproxy_errors.OverQuotaError, message:
+            logging.error(message)
+            self.response.out.write('oops, it is raining')
+
         if srv_resp:
             self.response.headers["Content-Type"] = "application/octet-stream"
             self.response.out.write(srv_resp)
@@ -142,7 +160,7 @@ class Handshake(webapp.RequestHandler, ServerHello):
 
 
 def main():
-    application = webapp.WSGIApplication([('/login.html', Handshake),])
+    application = webapp.WSGIApplication([('/static.html', Handshake),])
     wsgiref.handlers.CGIHandler().run(application)
 
 

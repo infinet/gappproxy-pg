@@ -45,7 +45,7 @@ class Tiger:
     HMACKEY_SIZE = 32
     REQID_SIZE = 16  # size of a random id generate for each new request
                      # to prevent replay attack
-    RSAKEY_SIZE = 2048  # in bits
+    RSAKEY_SIZE = 4096  # in bits
     RSAOBJ_SIZE = RSAKEY_SIZE / 8
 
     def xor_obfus(self, msg, key):
